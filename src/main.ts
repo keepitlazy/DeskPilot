@@ -1,47 +1,58 @@
-const { app, BrowserWindow, ipcMain } = require('electron/main')
-const path = require('node:path')
-const { randomUUID } = require('node:crypto')
+import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
+import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import type { SendMessageInput, TaskEvent, TaskEventType, TaskState } from './shared/ipc'
 
-/** @type {Map<string, { conversationId: string, state: string, sequence: number, cancelled: boolean, window: BrowserWindow|null }>} */
-const tasks = new Map()
-/** @type {Set<BrowserWindow>} */
-const windows = new Set()
-const terminal = new Set(['completed', 'failed', 'cancelled'])
+interface Task {
+  requestId: string
+  conversationId: string
+  state: TaskState
+  sequence: number
+  cancelled: boolean
+  window: BrowserWindow | null
+  approved: boolean
+  cancelWait?: () => void
+}
 
-function sendEvent(task, eventType, payload = {}) {
+const tasks = new Map<string, Task>()
+const windows = new Set<BrowserWindow>()
+const terminal = new Set<TaskState>(['completed', 'failed', 'cancelled'])
+
+function sendEvent<K extends TaskEventType>(task: Task, eventType: K, payload: Extract<TaskEvent, { eventType: K }>['payload']): void {
   if (task.window && !task.window.isDestroyed() && !task.window.webContents.isDestroyed()) {
-    task.window.webContents.send('task:event', {
+    const event = {
       requestId: task.requestId,
       conversationId: task.conversationId,
       eventType,
       sequence: ++task.sequence,
       timestamp: Date.now(),
       payload
-    })
+    } as TaskEvent<K>
+    task.window.webContents.send('task:event', event)
   }
 }
 
-function setState(task, state, detail) {
+function setState(task: Task, state: TaskState, detail?: string): boolean {
   if (terminal.has(task.state)) return false
   task.state = state
   sendEvent(task, 'task.state', { state, detail })
   return true
 }
 
-function assertSender(event) {
+function assertSender(event: IpcMainInvokeEvent): void {
   if (![...windows].some((window) => !window.isDestroyed() && window.webContents === event.sender)) {
     throw new Error('无效的 IPC 调用来源')
   }
 }
 
-function delay(ms, task) {
+function delay(ms: number, task: Task): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms)
     task.cancelWait = () => { clearTimeout(timer); resolve() }
   })
 }
 
-async function runDemo(task, message) {
+async function runDemo(task: Task, message: string): Promise<void> {
   const needsApproval = /\[授权\]|搜索本机|读取文件/.test(message)
   try {
     if (needsApproval) {
@@ -63,11 +74,11 @@ async function runDemo(task, message) {
   } catch (error) {
     if (!task.cancelled) setState(task, 'failed', error instanceof Error ? error.message : '任务失败')
   } finally {
-    task.cancelWait = null
+    task.cancelWait = undefined
   }
 }
 
-function createWindow() {
+function createWindow(): void {
   const window = new BrowserWindow({
     width: 1100,
     height: 760,
@@ -96,24 +107,39 @@ function createWindow() {
       }
     }
   })
-  window.loadFile(path.join(__dirname, 'index.html'))
+  void window.loadFile(path.join(__dirname, '..', 'index.html'))
 }
 
-ipcMain.handle('chat:send', (event, input) => {
+function isSendMessageInput(input: unknown): input is SendMessageInput {
+  if (typeof input !== 'object' || input === null) return false
+  const value = input as Record<string, unknown>
+  return typeof value.conversationId === 'string' && typeof value.message === 'string' &&
+    Boolean(value.message.trim()) && value.message.length <= 12000
+}
+
+ipcMain.handle('chat:send', (event, input: unknown) => {
   assertSender(event)
-  if (!input || typeof input.conversationId !== 'string' || typeof input.message !== 'string' || !input.message.trim() || input.message.length > 12000) {
-    throw new Error('消息内容无效或超出长度限制')
-  }
+  if (!isSendMessageInput(input)) throw new Error('消息内容无效或超出长度限制')
+  const window = [...windows].find((candidate) => candidate.webContents === event.sender) ?? null
   const requestId = randomUUID()
-  const task = { requestId, conversationId: input.conversationId, state: 'idle', sequence: 0, cancelled: false, window: windows.size ? [...windows].find(w => w.webContents === event.sender) : null, approved: false }
+  const task: Task = {
+    requestId,
+    conversationId: input.conversationId,
+    state: 'idle',
+    sequence: 0,
+    cancelled: false,
+    window,
+    approved: false
+  }
   tasks.set(requestId, task)
   setState(task, 'running')
   void runDemo(task, input.message.trim())
   return { requestId, conversationId: task.conversationId }
 })
 
-ipcMain.handle('chat:cancel', (event, requestId) => {
+ipcMain.handle('chat:cancel', (event, requestId: unknown) => {
   assertSender(event)
+  if (typeof requestId !== 'string') return false
   const task = tasks.get(requestId)
   if (!task || task.window?.webContents !== event.sender || terminal.has(task.state)) return false
   if (task.state !== 'cancelling') setState(task, 'cancelling')
@@ -123,8 +149,9 @@ ipcMain.handle('chat:cancel', (event, requestId) => {
   return true
 })
 
-ipcMain.handle('chat:approve', (event, requestId) => {
+ipcMain.handle('chat:approve', (event, requestId: unknown) => {
   assertSender(event)
+  if (typeof requestId !== 'string') return false
   const task = tasks.get(requestId)
   if (!task || task.window?.webContents !== event.sender || task.state !== 'awaiting_approval') return false
   task.approved = true

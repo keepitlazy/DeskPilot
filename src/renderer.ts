@@ -1,19 +1,38 @@
-const $ = (id) => document.getElementById(id)
-const messageList = $('message-list')
-const input = $('message-input')
-const sendButton = $('send-button')
-const taskBanner = $('task-banner')
-const conversations = []
-const tasks = new Map()
-let activeConversationId = null
-let activeRequestId = null
+import type { TaskEvent, TaskState } from './shared/ipc'
+
+type Role = 'user' | 'assistant'
+interface Message { id: string; role: Role; text: string }
+interface Conversation { id: string; title: string; messages: Message[]; createdAt: number }
+interface ConversationTask {
+  requestId: string
+  conversationId: string
+  state?: TaskState
+  sequence: number
+  assistantMessageId?: string
+  detail?: string
+}
+
+function byId<T extends HTMLElement>(id: string): T {
+  const element = document.getElementById(id)
+  if (!element) throw new Error(`Missing required element: #${id}`)
+  return element as T
+}
+
+const messageList = byId<HTMLDivElement>('message-list')
+const input = byId<HTMLTextAreaElement>('message-input')
+const sendButton = byId<HTMLButtonElement>('send-button')
+const taskBanner = byId<HTMLElement>('task-banner')
+const conversations: Conversation[] = []
+const tasks = new Map<string, ConversationTask>()
+let activeConversationId: string | null = null
+let activeRequestId: string | null = null
 let sending = false
 
-function makeId() { return globalThis.crypto.randomUUID() }
-function currentConversation() { return conversations.find((item) => item.id === activeConversationId) }
+function makeId(): string { return globalThis.crypto.randomUUID() }
+function currentConversation(): Conversation | undefined { return conversations.find((item) => item.id === activeConversationId) }
 
-function createConversation() {
-  const conversation = { id: makeId(), title: '新会话', messages: [], createdAt: Date.now() }
+function createConversation(): void {
+  const conversation: Conversation = { id: makeId(), title: '新会话', messages: [], createdAt: Date.now() }
   conversations.unshift(conversation)
   activeConversationId = conversation.id
   activeRequestId = null
@@ -21,8 +40,8 @@ function createConversation() {
   input.focus()
 }
 
-function renderSidebar() {
-  const nav = $('conversation-list')
+function renderSidebar(): void {
+  const nav = byId<HTMLElement>('conversation-list')
   nav.replaceChildren()
   for (const conversation of conversations) {
     const button = document.createElement('button')
@@ -37,29 +56,30 @@ function renderSidebar() {
     button.addEventListener('click', () => {
       activeConversationId = conversation.id
       const latestTask = [...tasks.values()].reverse().find((item) => item.conversationId === conversation.id)
-      activeRequestId = latestTask?.requestId || null
+      activeRequestId = latestTask?.requestId ?? null
       renderAll()
     })
     nav.append(button)
   }
 }
 
-function addMessage(role, text = '') {
+function addMessage(role: Role, text = ''): Message {
   const conversation = currentConversation()
-  const message = { id: makeId(), role, text }
+  if (!conversation) throw new Error('No active conversation')
+  const message: Message = { id: makeId(), role, text }
   conversation.messages.push(message)
   return message
 }
 
-function renderMessages() {
+function renderMessages(): void {
   const conversation = currentConversation()
-  $('conversation-title').textContent = conversation?.title || '新会话'
+  byId<HTMLElement>('conversation-title').textContent = conversation?.title ?? '新会话'
   messageList.replaceChildren()
   if (!conversation || conversation.messages.length === 0) {
     const welcome = document.createElement('div')
     welcome.className = 'welcome'
     welcome.innerHTML = '<div class="welcome-mark"><svg viewBox="0 0 24 24"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg></div><h1>你好，我是 DeskPilot</h1><p>你的本机 AI 助手。可以先试试下面的示例，或直接输入你想做的事。</p><div class="suggestions"><button class="suggestion"><strong>整理一个想法</strong>帮我把零散的想法整理成清晰的计划</button><button class="suggestion"><strong>搜索本机文件</strong>搜索本机文件并总结相关内容</button><button class="suggestion"><strong>解释一段代码</strong>用简单的语言解释代码是如何工作的</button><button class="suggestion"><strong>请求授权演示</strong>[授权] 读取文件前请先请求我的确认</button></div>'
-    welcome.querySelectorAll('.suggestion').forEach((button) => button.addEventListener('click', () => { input.value = button.innerText.replace(/^.*\n/, ''); input.focus(); resizeInput() }))
+    welcome.querySelectorAll<HTMLButtonElement>('.suggestion').forEach((button) => button.addEventListener('click', () => { input.value = button.innerText.replace(/^.*\n/, ''); input.focus(); resizeInput() }))
     messageList.append(welcome)
     return
   }
@@ -83,14 +103,15 @@ function renderMessages() {
   messageList.scrollTop = messageList.scrollHeight
 }
 
-function stateLabel(state) {
-  return ({ idle: '准备中', running: '正在生成回复…', awaiting_approval: '等待你的授权', cancelling: '正在停止…', completed: '已完成', failed: '任务失败', cancelled: '已停止' })[state] || state
+function stateLabel(state: TaskState | undefined): string {
+  if (!state) return '准备中'
+  return ({ idle: '准备中', running: '正在生成回复…', awaiting_approval: '等待你的授权', cancelling: '正在停止…', completed: '已完成', failed: '任务失败', cancelled: '已停止' })[state]
 }
 
-function renderTaskBanner() {
+function renderTaskBanner(): void {
   const conversation = currentConversation()
   const task = conversation && [...tasks.values()].reverse().find((item) => item.conversationId === conversation.id)
-  if (!task || !['running', 'awaiting_approval', 'cancelling', 'failed', 'cancelled', 'completed'].includes(task.state)) {
+  if (!task || !task.state || !['running', 'awaiting_approval', 'cancelling', 'failed', 'cancelled', 'completed'].includes(task.state)) {
     taskBanner.hidden = true
     return
   }
@@ -107,28 +128,28 @@ function renderTaskBanner() {
   if (task.state === 'awaiting_approval') {
     const approve = document.createElement('button')
     approve.textContent = '确认并继续'
-    approve.addEventListener('click', () => window.deskPilot.approve(task.requestId))
+    approve.addEventListener('click', () => { void window.deskPilot.approve(task.requestId) })
     taskBanner.append(approve)
   } else if (task.state === 'running') {
     const stop = document.createElement('button')
     stop.textContent = '停止'
-    stop.addEventListener('click', () => window.deskPilot.cancel(task.requestId))
+    stop.addEventListener('click', () => { void window.deskPilot.cancel(task.requestId) })
     taskBanner.append(stop)
   }
 }
 
-function renderAll() { renderSidebar(); renderMessages(); renderTaskBanner() }
-function resizeInput() { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px` }
+function renderAll(): void { renderSidebar(); renderMessages(); renderTaskBanner() }
+function resizeInput(): void { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px` }
 
-async function sendMessage() {
+async function sendMessage(): Promise<void> {
   const message = input.value.trim()
-  if (!message || sending || activeRequestId && ['running', 'awaiting_approval', 'cancelling'].includes(tasks.get(activeRequestId)?.state)) return
+  const activeTask = activeRequestId ? tasks.get(activeRequestId) : undefined
+  if (!message || sending || activeTask && ['running', 'awaiting_approval', 'cancelling'].includes(activeTask.state ?? '')) return
   if (!activeConversationId) createConversation()
   const conversation = currentConversation()
+  if (!conversation) return
   addMessage('user', message)
-  if (conversation.messages.length === 1) {
-    conversation.title = message.length > 24 ? `${message.slice(0, 24)}…` : message
-  }
+  if (conversation.messages.length === 1) conversation.title = message.length > 24 ? `${message.slice(0, 24)}…` : message
   const assistantMessage = addMessage('assistant', '')
   input.value = ''
   resizeInput()
@@ -136,7 +157,7 @@ async function sendMessage() {
   sendButton.disabled = true
   const placeholderId = `pending:${makeId()}`
   activeRequestId = placeholderId
-  const pending = { requestId: placeholderId, conversationId: conversation.id, state: 'running', sequence: 0, assistantMessageId: assistantMessage.id }
+  const pending: ConversationTask = { requestId: placeholderId, conversationId: conversation.id, state: 'running', sequence: 0, assistantMessageId: assistantMessage.id }
   tasks.set(placeholderId, pending)
   renderAll()
   try {
@@ -149,7 +170,7 @@ async function sendMessage() {
     if (activeRequestId === placeholderId) activeRequestId = result.requestId
   } catch (error) {
     pending.state = 'failed'
-    pending.detail = error.message || '无法发送消息'
+    pending.detail = error instanceof Error ? error.message : '无法发送消息'
   } finally {
     sending = false
     sendButton.disabled = false
@@ -158,7 +179,7 @@ async function sendMessage() {
   }
 }
 
-window.deskPilot.onTaskEvent((event) => {
+window.deskPilot.onTaskEvent((event: TaskEvent) => {
   let task = tasks.get(event.requestId)
   if (!task) {
     task = { requestId: event.requestId, conversationId: event.conversationId, sequence: 0 }
@@ -172,8 +193,8 @@ window.deskPilot.onTaskEvent((event) => {
     task.state = event.payload.state
     task.detail = event.payload.detail
   } else if (event.eventType === 'task.delta') {
-    const assistant = conversation.messages.find((item) => item.id === task.assistantMessageId) || [...conversation.messages].reverse().find((item) => item.role === 'assistant')
-    if (assistant && !['cancelled', 'failed', 'completed'].includes(task.state)) assistant.text += event.payload.text
+    const assistant = conversation.messages.find((item) => item.id === task?.assistantMessageId) || [...conversation.messages].reverse().find((item) => item.role === 'assistant')
+    if (assistant && !['cancelled', 'failed', 'completed'].includes(task.state ?? '')) assistant.text += event.payload.text
   } else if (event.eventType === 'task.approval' && event.payload.message) {
     task.detail = event.payload.message
   }
@@ -181,10 +202,10 @@ window.deskPilot.onTaskEvent((event) => {
   else if (conversation.id === activeConversationId) renderMessages()
 })
 
-$('new-chat').addEventListener('click', createConversation)
-sendButton.addEventListener('click', sendMessage)
+byId<HTMLButtonElement>('new-chat').addEventListener('click', createConversation)
+sendButton.addEventListener('click', () => { void sendMessage() })
 input.addEventListener('input', resizeInput)
-input.addEventListener('keydown', (event) => {
+input.addEventListener('keydown', (event: KeyboardEvent) => {
   if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage() }
 })
 

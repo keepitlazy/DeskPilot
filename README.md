@@ -27,21 +27,25 @@ npm start
 ## 开发命令
 
 ```bash
-npm start       # 启动 Electron 应用
-npm run typecheck  # 运行 TypeScript 类型检查
+npm run build       # 将 TypeScript 编译到 dist/
+npm run typecheck   # 仅检查类型，不生成文件
+npm start           # 编译后启动 Electron 应用
+npm run clean       # 删除编译产物
 ```
 
 ## 项目结构
 
 ```text
 DeskPilot/
-├── main.js             # Electron 主进程与任务调度
-├── preload.js          # 安全暴露给渲染进程的 API
-├── renderer.js         # 界面交互与 IPC 事件处理
+├── src/
+│   ├── main.ts         # Electron 主进程与任务调度
+│   ├── preload.ts      # 安全暴露给渲染进程的 API
+│   ├── renderer.ts     # 界面交互与 IPC 事件处理
+│   └── shared/         # IPC 数据类型与 Window 类型扩展
+├── dist/               # TypeScript 编译产物（自动生成，不提交）
 ├── index.html          # 应用页面结构
 ├── styles.css          # 页面样式
-├── ipc.d.ts            # IPC 类型声明
-├── electron-shims.d.ts # Electron 类型辅助声明
+├── tsconfig.json       # TypeScript 编译配置
 └── package.json        # 项目配置与命令
 ```
 

@@ -25,8 +25,3 @@ export interface DeskPilotAPI {
   approve(requestId: string): Promise<boolean>
   onTaskEvent(callback: (event: TaskEvent) => void): () => void
 }
-
-declare global {
-  interface Window { deskPilot: DeskPilotAPI }
-}
-
